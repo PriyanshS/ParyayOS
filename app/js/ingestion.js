@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════
-//  CampusZero — CSV Ingestion & IoT Simulation
+//  CampusZero — CSV Ingestion & IoT Simulation (API-backed)
 // ═══════════════════════════════════════════════════════
 
 const Ingestion = {
@@ -23,7 +23,7 @@ const Ingestion = {
     },
 
     // ── Validate & Ingest CSV for a pillar ──
-    ingestCSV(pillar, csvText) {
+    async ingestCSV(pillar, csvText) {
         const { headers, rows } = this.parseCSV(csvText);
         const results = { success: 0, errors: [], warnings: [] };
 
@@ -40,6 +40,8 @@ const Ingestion = {
             return results;
         }
 
+        // Batch all entries and send to server
+        const entries = [];
         rows.forEach((row, idx) => {
             try {
                 const dateVal = row.date;
@@ -47,7 +49,6 @@ const Ingestion = {
                 if (typeof dateVal === 'string') {
                     ts = new Date(dateVal).getTime();
                     if (isNaN(ts)) {
-                        // Try DD/MM/YYYY
                         const parts = dateVal.split(/[\/\-]/);
                         if (parts.length === 3) {
                             ts = new Date(parts[2], parts[1] - 1, parts[0]).getTime();
@@ -63,12 +64,21 @@ const Ingestion = {
 
                 const entry = { timestamp: ts };
                 headers.forEach(h => { if (h !== 'date') entry[h] = row[h]; });
-                Store.addReading(pillar, entry);
+                entries.push(entry);
                 results.success++;
             } catch (e) {
                 results.warnings.push(`Row ${idx + 2}: ${e.message}`);
             }
         });
+
+        // Bulk send to API
+        if (entries.length > 0) {
+            await fetch(`/api/readings/${pillar}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(entries)
+            });
+        }
 
         return results;
     },
@@ -77,9 +87,9 @@ const Ingestion = {
     handleFileUpload(file, pillar) {
         return new Promise((resolve, reject) => {
             const reader = new FileReader();
-            reader.onload = (e) => {
+            reader.onload = async (e) => {
                 try {
-                    const result = this.ingestCSV(pillar, e.target.result);
+                    const result = await this.ingestCSV(pillar, e.target.result);
                     resolve(result);
                 } catch (err) {
                     reject(err);
@@ -98,12 +108,11 @@ const Ingestion = {
         if (callback) this._simCallbacks.push(callback);
         if (this._simInterval) return;
 
-        this._simInterval = setInterval(() => {
+        this._simInterval = setInterval(async () => {
             const now = Date.now();
             const hour = new Date().getHours();
             const isDay = hour >= 6 && hour <= 18;
 
-            // Power
             const powerReading = {
                 timestamp: now,
                 consumption_kwh: Math.round(80 + Math.random() * 40 + (isDay ? 30 : -10)),
@@ -111,18 +120,16 @@ const Ingestion = {
                 peak_kw: Math.round(300 + Math.random() * 150),
                 grid_import_kwh: Math.round(40 + Math.random() * 30),
             };
-            Store.addReading('power', powerReading);
+            await Store.addReading('power', powerReading);
 
-            // Water
             const waterReading = {
                 timestamp: now,
                 consumption_liters: Math.round(3000 + Math.random() * 2000),
                 recycled_liters: Math.round(1000 + Math.random() * 800),
                 harvested_liters: Math.round(Math.random() * 500),
             };
-            Store.addReading('water', waterReading);
+            await Store.addReading('water', waterReading);
 
-            // Waste
             const wasteReading = {
                 timestamp: now,
                 total_kg: Math.round(50 + Math.random() * 30),
@@ -130,11 +137,11 @@ const Ingestion = {
                 composted_kg: Math.round(10 + Math.random() * 10),
                 landfill_kg: Math.round(5 + Math.random() * 10),
             };
-            Store.addReading('waste', wasteReading);
+            await Store.addReading('waste', wasteReading);
 
             const data = { power: powerReading, water: waterReading, waste: wasteReading };
             this._simCallbacks.forEach(cb => cb(data));
-        }, 5000); // Every 5 seconds
+        }, 5000);
     },
 
     stopSimulation() {
@@ -146,10 +153,10 @@ const Ingestion = {
     },
 
     // ── Daily Prompt (Static Mode) ──
-    shouldPromptUpload() {
-        const mode = Store.getMode();
+    async shouldPromptUpload() {
+        const mode = await Store.getMode();
         if (mode !== 'static') return false;
-        const readings = Store.getReadings();
+        const readings = await Store.getReadings();
         if (!readings.power.length) return true;
         const lastTs = readings.power[readings.power.length - 1].timestamp;
         const daysSince = (Date.now() - lastTs) / 86400000;

@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════
-//  CampusZero — CoC-Style Alert System
+//  CampusZero — CoC-Style Alert System (API-backed)
 // ═══════════════════════════════════════════════════════
 
 const Alerts = {
@@ -11,7 +11,6 @@ const Alerts = {
         this.startMonitoring();
     },
 
-    // ── Thresholds ──
     THRESHOLDS: {
         power_high: {
             field: 'consumption_kwh', op: '>', value: 150, pillar: 'power',
@@ -40,26 +39,24 @@ const Alerts = {
         },
     },
 
-    // ── Check readings against thresholds ──
-    checkThresholds() {
-        const readings = Store.getReadings();
+    async checkThresholds() {
+        const readings = await Store.getReadings();
+        const existingAlerts = await Store.getAlerts();
         const newAlerts = [];
 
-        Object.entries(this.THRESHOLDS).forEach(([key, threshold]) => {
+        for (const [key, threshold] of Object.entries(this.THRESHOLDS)) {
             const pillarData = readings[threshold.pillar];
-            if (!pillarData || pillarData.length === 0) return;
+            if (!pillarData || pillarData.length === 0) continue;
             const latest = pillarData[pillarData.length - 1];
             const val = latest[threshold.field];
-            if (val === undefined) return;
+            if (val === undefined) continue;
 
             let triggered = false;
             if (threshold.op === '>' && val > threshold.value) triggered = true;
             if (threshold.op === '<' && val < threshold.value) triggered = true;
 
             if (triggered) {
-                // Don't spam same alert within 60 seconds
-                const existing = Store.getAlerts();
-                const recent = existing.find(a =>
+                const recent = existingAlerts.find(a =>
                     a.key === key && (Date.now() - a.time) < 60000
                 );
                 if (!recent) {
@@ -75,21 +72,18 @@ const Alerts = {
                             ? [{ label: 'Accept & Shed Load', action: 'accept' }, { label: 'Dismiss', action: 'dismiss' }]
                             : [{ label: 'Acknowledge', action: 'dismiss' }]
                     };
-                    Store.addAlert(alert);
+                    await Store.addAlert(alert);
                     newAlerts.push(alert);
                 }
             }
-        });
-
+        }
         return newAlerts;
     },
 
-    // ── Seasonal Predictions ──
     checkSeasonalAlerts() {
         const month = new Date().getMonth();
         const alerts = [];
 
-        // Summer (March-May in India)
         if (month >= 2 && month <= 4) {
             alerts.push({
                 title: '☀️ Summer Peak Approaching!',
@@ -98,7 +92,6 @@ const Alerts = {
                 actions: [{ label: 'Activate Summer Protocol', action: 'accept' }, { label: 'Later', action: 'dismiss' }]
             });
         }
-        // Monsoon (June-Sept)
         if (month >= 5 && month <= 8) {
             alerts.push({
                 title: '🌧️ Monsoon Season Active!',
@@ -107,7 +100,6 @@ const Alerts = {
                 actions: [{ label: 'Enable Harvest Mode', action: 'accept' }, { label: 'Skip', action: 'dismiss' }]
             });
         }
-        // Winter (Nov-Jan)
         if (month >= 10 || month === 0) {
             alerts.push({
                 title: '❄️ Winter Conservation Mode',
@@ -116,11 +108,9 @@ const Alerts = {
                 actions: [{ label: 'Enable Winter Schedule', action: 'accept' }, { label: 'Dismiss', action: 'dismiss' }]
             });
         }
-
         return alerts;
     },
 
-    // ── Render a single alert popup ──
     renderAlertPopup(alert) {
         const div = document.createElement('div');
         div.className = `alert-popup alert-${alert.type}`;
@@ -137,31 +127,25 @@ const Alerts = {
         ).join('')}
       </div>
     `;
-
-        // Animate in
         div.style.animation = 'alertSlideIn 0.5s cubic-bezier(0.16,1,0.3,1) forwards';
-
         if (this._container) {
             this._container.appendChild(div);
-            // Auto-remove after 15s
             setTimeout(() => { if (div.parentNode) div.remove(); }, 15000);
         }
     },
 
-    handleAction(alertId, action) {
-        if (alertId) Store.markAlertRead(alertId);
+    async handleAction(alertId, action) {
+        if (alertId) await Store.markAlertRead(alertId);
         if (action === 'accept') {
-            // Award XP for proactive action
-            const state = Store.getGameState();
+            const state = await Store.getGameState();
             state.xp += 15;
-            Store.setGameState(state);
+            await Store.setGameState(state);
         }
     },
 
     startMonitoring() {
-        // Check every 10 seconds
-        this._checkInterval = setInterval(() => {
-            const newAlerts = this.checkThresholds();
+        this._checkInterval = setInterval(async () => {
+            const newAlerts = await this.checkThresholds();
             newAlerts.forEach(a => this.renderAlertPopup(a));
         }, 10000);
     },

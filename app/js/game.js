@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════
-//  CampusZero — Game Engine (XP, Levels, Progress)
+//  CampusZero — Game Engine (XP, Levels, Progress) — API-backed
 // ═══════════════════════════════════════════════════════
 
 const Game = {
@@ -32,9 +32,8 @@ const Game = {
         return { current, next, progress: Math.min(100, Math.max(0, progress)) };
     },
 
-    // ── Calculate net-zero ratio ──
-    getNetZeroRatio() {
-        const readings = Store.getReadings();
+    async getNetZeroRatio() {
+        const readings = await Store.getReadings();
         const power = readings.power;
         if (power.length === 0) return { consumed: 0, generated: 0, ratio: 0 };
         const last30 = power.slice(-30);
@@ -47,28 +46,24 @@ const Game = {
         };
     },
 
-    // ── Process a day's data and update XP ──
-    processDay() {
-        const state = Store.getGameState();
+    async processDay() {
+        const state = await Store.getGameState();
         const today = new Date().toDateString();
-        if (state.lastPlayedDate === today) return state; // Already processed
+        if (state.lastPlayedDate === today) return state;
 
-        const { consumed, generated, ratio } = this.getNetZeroRatio();
+        const { consumed, generated, ratio } = await this.getNetZeroRatio();
         const prevRatio = state.consumed > 0 ? (state.generated / state.consumed) * 100 : 0;
 
         let xpDelta = 0;
         let improved = false;
 
         if (ratio > prevRatio) {
-            // Improved! Award XP
             xpDelta = Math.round(10 + (ratio - prevRatio) * 5);
             improved = true;
         } else if (ratio < prevRatio && prevRatio > 0) {
-            // Worsened! Lose XP
             xpDelta = -Math.round(5 + (prevRatio - ratio) * 2);
         } else {
-            // Maintained
-            xpDelta = 5; // Small reward for consistency
+            xpDelta = 5;
         }
 
         state.xp = Math.max(0, state.xp + xpDelta);
@@ -80,64 +75,50 @@ const Game = {
         if (improved) {
             state.streak++;
             if (state.streak > state.bestStreak) state.bestStreak = state.streak;
-            // Streak bonus
             if (state.streak >= 7) state.xp += 50;
             if (state.streak >= 30) state.xp += 200;
         } else if (xpDelta < 0) {
             state.streak = 0;
         }
 
+        state.history = state.history || [];
         state.history.push({
-            date: today,
-            consumed, generated, ratio,
-            xpDelta,
-            totalXp: state.xp
+            date: today, consumed, generated, ratio,
+            xpDelta, totalXp: state.xp
         });
-
-        // Keep last 365 entries
         if (state.history.length > 365) state.history = state.history.slice(-365);
 
         const levelInfo = this.getLevelInfo(state.xp);
         state.level = levelInfo.current.level;
 
-        Store.setGameState(state);
+        await Store.setGameState(state);
         return { ...state, xpDelta, improved, levelInfo };
     },
 
-    // ── Get display stats for the UI ──
-    getStats() {
-        const state = Store.getGameState();
-        const { consumed, generated, ratio } = this.getNetZeroRatio();
+    async getStats() {
+        const state = await Store.getGameState();
+        const { consumed, generated, ratio } = await this.getNetZeroRatio();
         const levelInfo = this.getLevelInfo(state.xp);
-        return {
-            ...state,
-            consumed,
-            generated,
-            ratio,
-            levelInfo
-        };
+        return { ...state, consumed, generated, ratio, levelInfo };
     },
 
-    // ── Compare real data vs ideal roadmap ──
-    getRoadmapComparison() {
-        const readings = Store.getReadings();
+    async getRoadmapComparison() {
+        const readings = await Store.getReadings();
         const power = readings.power;
         if (power.length < 7) return null;
 
-        // Calculate ideal trajectory: linear decrease to net-zero over 365 days
         const first = power[0];
         const initialConsumption = first.consumption_kwh || 1000;
         const daysOfData = power.length;
         const idealDaily = power.map((_, i) => {
             const progress = i / 365;
-            return Math.round(initialConsumption * (1 - progress * 0.8)); // 80% reduction goal
+            return Math.round(initialConsumption * (1 - progress * 0.8));
         });
-
         const actual = power.map(r => r.consumption_kwh || 0);
 
         return {
             idealDaily: idealDaily.slice(0, daysOfData),
-            actual: actual,
+            actual,
             daysOfData,
             avgActual: actual.reduce((s, v) => s + v, 0) / actual.length,
             avgIdeal: idealDaily.slice(0, daysOfData).reduce((s, v) => s + v, 0) / daysOfData,

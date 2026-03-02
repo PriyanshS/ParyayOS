@@ -1,142 +1,174 @@
 // ═══════════════════════════════════════════════════════
-//  CampusZero — LocalStorage Data Store
+//  CampusZero — API-Backed Data Store
+//  All data now persists in SQLite3 via REST API
 // ═══════════════════════════════════════════════════════
 
+const API = '/api';
+
+// Local cache to avoid excessive requests
+const _cache = {
+    admin: null,
+    campus: null,
+    mode: null,
+    readings: null,
+    game: null,
+    roadmap: null,
+    alerts: null,
+    _dirty: {}
+};
+
+async function _fetch(url, opts = {}) {
+    opts.headers = { 'Content-Type': 'application/json', ...opts.headers };
+    if (opts.body && typeof opts.body === 'object') opts.body = JSON.stringify(opts.body);
+    const res = await fetch(API + url, opts);
+    return res.json();
+}
+
 const Store = {
-    _prefix: 'cz_',
-
-    _get(key) {
-        try { return JSON.parse(localStorage.getItem(this._prefix + key)); }
-        catch { return null; }
-    },
-    _set(key, val) {
-        localStorage.setItem(this._prefix + key, JSON.stringify(val));
-    },
-    _remove(key) {
-        localStorage.removeItem(this._prefix + key);
-    },
-
     // ── Auth ──
-    getAdmin() { return this._get('admin'); },
-    setAdmin(admin) { this._set('admin', admin); },
-    isLoggedIn() { return !!this.getAdmin(); },
-    logout() { this._remove('admin'); },
+    async getAdmin() {
+        if (_cache.admin) return _cache.admin;
+        const { admin } = await _fetch('/auth/me');
+        _cache.admin = admin;
+        return admin;
+    },
+    async setAdmin(admin) {
+        _cache.admin = admin;
+    },
+    async isLoggedIn() {
+        const admin = await this.getAdmin();
+        return !!admin;
+    },
+    async logout() {
+        await _fetch('/auth/logout', { method: 'POST', body: {} });
+        _cache.admin = null;
+        _cache.campus = null;
+        _cache.mode = null;
+    },
 
     // ── Campus Profile ──
-    getCampus() { return this._get('campus') || null; },
-    setCampus(campus) { this._set('campus', campus); },
+    async getCampus() {
+        if (_cache.campus) return _cache.campus;
+        const { campus } = await _fetch('/campus');
+        _cache.campus = campus;
+        return campus;
+    },
+    async setCampus(campus) {
+        _cache.campus = campus;
+    },
 
     // ── Ingestion Mode ──
-    getMode() { return this._get('mode') || null; }, // 'static' | 'dynamic'
-    setMode(mode) { this._set('mode', mode); },
+    async getMode() {
+        if (_cache.mode) return _cache.mode;
+        const { mode } = await _fetch('/campus/mode');
+        _cache.mode = mode;
+        return mode;
+    },
+    async setMode(mode) {
+        await _fetch('/campus/mode', { method: 'PUT', body: { mode } });
+        _cache.mode = mode;
+    },
 
-    // ── Sensor Readings (time-series) ──
-    getReadings() {
-        return this._get('readings') || { power: [], water: [], waste: [] };
+    // ── Sensor Readings ──
+    async getReadings() {
+        if (_cache.readings) return _cache.readings;
+        const data = await _fetch('/readings');
+        _cache.readings = { power: data.power || [], water: data.water || [], waste: data.waste || [] };
+        return _cache.readings;
     },
-    addReading(pillar, entry) {
-        const r = this.getReadings();
-        if (!r[pillar]) r[pillar] = [];
-        r[pillar].push({ ...entry, timestamp: entry.timestamp || Date.now() });
-        // Keep last 365 days max
-        if (r[pillar].length > 365) r[pillar] = r[pillar].slice(-365);
-        this._set('readings', r);
+    async addReading(pillar, entry) {
+        const ts = entry.timestamp || Date.now();
+        await _fetch(`/readings/${pillar}`, { method: 'POST', body: { ...entry, timestamp: ts } });
+        // Update cache
+        if (_cache.readings) {
+            if (!_cache.readings[pillar]) _cache.readings[pillar] = [];
+            _cache.readings[pillar].push({ ...entry, timestamp: ts });
+            if (_cache.readings[pillar].length > 365) {
+                _cache.readings[pillar] = _cache.readings[pillar].slice(-365);
+            }
+        }
     },
-    setReadings(readings) { this._set('readings', readings); },
+    async setReadings(readings) {
+        // Bulk upload: clear and re-add
+        for (const pillar of ['power', 'water', 'waste']) {
+            if (readings[pillar] && readings[pillar].length > 0) {
+                await _fetch(`/readings/${pillar}`, { method: 'POST', body: readings[pillar] });
+            }
+        }
+        _cache.readings = readings;
+    },
 
     // ── Game State ──
-    getGameState() {
-        return this._get('game') || {
-            xp: 0,
-            level: 1,
-            streak: 0,
-            bestStreak: 0,
-            totalDays: 0,
-            consumed: 0,
-            generated: 0,
-            history: [],
-            lastPlayedDate: null
-        };
+    async getGameState() {
+        if (_cache.game) return _cache.game;
+        const data = await _fetch('/game');
+        _cache.game = data;
+        return data;
     },
-    setGameState(state) { this._set('game', state); },
+    async setGameState(state) {
+        await _fetch('/game', { method: 'PUT', body: state });
+        _cache.game = state;
+    },
 
     // ── Roadmap ──
-    getRoadmap() {
-        return this._get('roadmap') || [];
+    async getRoadmap() {
+        const { items } = await _fetch('/roadmap');
+        _cache.roadmap = items || [];
+        return _cache.roadmap;
     },
-    addRoadmapItem(item) {
-        const r = this.getRoadmap();
-        r.push({ ...item, id: 'rm_' + Date.now(), addedAt: Date.now(), completed: false });
-        this._set('roadmap', r);
+    async addRoadmapItem(item) {
+        const result = await _fetch('/roadmap', { method: 'POST', body: item });
+        _cache.roadmap = null; // invalidate
+        return result;
     },
-    updateRoadmapItem(id, updates) {
-        const r = this.getRoadmap();
-        const idx = r.findIndex(i => i.id === id);
-        if (idx >= 0) { Object.assign(r[idx], updates); this._set('roadmap', r); }
+    async updateRoadmapItem(id, updates) {
+        await _fetch(`/roadmap/${id}`, { method: 'PUT', body: updates });
+        _cache.roadmap = null; // invalidate
     },
 
     // ── Alerts ──
-    getAlerts() { return this._get('alerts') || []; },
-    addAlert(alert) {
-        const a = this.getAlerts();
-        a.unshift({ ...alert, id: 'al_' + Date.now(), time: Date.now(), read: false });
-        if (a.length > 50) a.length = 50;
-        this._set('alerts', a);
+    async getAlerts() {
+        const { alerts } = await _fetch('/alerts');
+        _cache.alerts = alerts || [];
+        return _cache.alerts;
     },
-    markAlertRead(id) {
-        const a = this.getAlerts();
-        const al = a.find(x => x.id === id);
-        if (al) { al.read = true; this._set('alerts', a); }
+    async addAlert(alert) {
+        const result = await _fetch('/alerts', { method: 'POST', body: alert });
+        _cache.alerts = null; // invalidate
+        return result;
     },
-    getUnreadCount() {
-        return this.getAlerts().filter(a => !a.read).length;
+    async markAlertRead(id) {
+        await _fetch(`/alerts/${id}/read`, { method: 'PUT', body: {} });
+        if (_cache.alerts) {
+            const al = _cache.alerts.find(a => a.id === id);
+            if (al) al.read = true;
+        }
+    },
+    async getUnreadCount() {
+        const { count } = await _fetch('/alerts/unread-count');
+        return count;
     },
 
     // ── Twin Config ──
-    getTwinConfig() { return this._get('twin') || null; },
-    setTwinConfig(config) { this._set('twin', config); },
-
-    // ── Full Reset ──
-    resetAll() {
-        Object.keys(localStorage).forEach(k => {
-            if (k.startsWith(this._prefix)) localStorage.removeItem(k);
-        });
+    async getTwinConfig() {
+        const { config } = await _fetch('/twin');
+        return config;
+    },
+    async setTwinConfig(config) {
+        await _fetch('/twin', { method: 'PUT', body: { config } });
     },
 
-    // ── Generate sample historical data for demo ──
-    generateSampleData() {
-        const readings = { power: [], water: [], waste: [] };
-        const now = Date.now();
-        const DAY = 86400000;
+    // ── Full Reset ──
+    async resetAll() {
+        // Clear caches
+        Object.keys(_cache).forEach(k => { _cache[k] = null; });
+    },
 
-        for (let i = 89; i >= 0; i--) {
-            const ts = now - i * DAY;
-            const season = Math.sin((i / 90) * Math.PI * 2);
-
-            readings.power.push({
-                timestamp: ts,
-                consumption_kwh: Math.round(1200 + season * 300 + (Math.random() - 0.5) * 200),
-                generation_kwh: Math.round(600 + season * 150 + Math.random() * 100),
-                peak_kw: Math.round(400 + Math.random() * 100),
-                grid_import_kwh: Math.round(500 + (Math.random() - 0.5) * 150),
-            });
-
-            readings.water.push({
-                timestamp: ts,
-                consumption_liters: Math.round(45000 + season * 8000 + (Math.random() - 0.5) * 5000),
-                recycled_liters: Math.round(15000 + Math.random() * 5000),
-                harvested_liters: Math.round(season > 0 ? season * 10000 + Math.random() * 3000 : Math.random() * 2000),
-            });
-
-            readings.waste.push({
-                timestamp: ts,
-                total_kg: Math.round(800 + (Math.random() - 0.5) * 200),
-                recycled_kg: Math.round(400 + Math.random() * 150),
-                composted_kg: Math.round(200 + Math.random() * 100),
-                landfill_kg: Math.round(100 + Math.random() * 80),
-            });
-        }
-        this.setReadings(readings);
+    // ── Generate sample data (now server-side) ──
+    async generateSampleData() {
+        const result = await _fetch('/readings/sample', { method: 'POST', body: {} });
+        _cache.readings = null; // invalidate cache
+        return result;
     }
 };
 

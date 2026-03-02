@@ -100,8 +100,8 @@ const CBA = {
     },
 
     // ── Generate default CBA based on campus state ──
-    generateDefaultCBA() {
-        const readings = Store.getReadings();
+    async generateDefaultCBA() {
+        const readings = await Store.getReadings();
         const power = readings.power;
         const avgConsumption = power.length > 0
             ? power.slice(-30).reduce((s, r) => s + (r.consumption_kwh || 0), 0) / Math.min(30, power.length)
